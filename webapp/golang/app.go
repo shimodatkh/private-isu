@@ -55,9 +55,9 @@ type Post struct {
 	Body         string    `db:"body"`
 	Mime         string    `db:"mime"`
 	CreatedAt    time.Time `db:"created_at"`
-	CommentCount int
-	Comments     []Comment
-	User         User
+	CommentCount int       `db:"comment_count"`
+	Comments     []Comment `db:"comments"`
+	User         User      `db:"user"`
 	CSRFToken    string
 }
 
@@ -437,21 +437,105 @@ func getLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func getIndex(w http.ResponseWriter, r *http.Request) {
+	log.Print("getIndex")
+
 	me := getSessionUser(r)
 
-	results := []Post{}
+	// results := []Post{}
 
-	err := db.Select(&results, "SELECT posts.`id`, `user_id`, `body`, `mime`, posts.`created_at` FROM `posts` join users on users.id = user_id where users.del_flg = 0 ORDER BY posts.`created_at` DESC LIMIT 20")
+	// err := db.Select(&results, "SELECT posts.`id`, `user_id`, `body`, `mime`, posts.`created_at` FROM `posts` join users on users.id = user_id where users.del_flg = 0 ORDER BY posts.`created_at` DESC LIMIT 20")
+	// if err != nil {
+	// 	log.Print(err)
+	// 	return
+	// }
+
+	query := `    SELECT 
+posts.id AS "id",
+posts.user_id AS "user_id",
+posts.body AS "body",
+posts.mime AS "mime",
+posts.created_at AS "created_at",
+users.id AS "user.id",
+users.account_name AS "user.account_name",
+(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id) AS "comment_count"
+FROM
+posts
+JOIN 
+users ON users.id = posts.user_id AND users.del_flg = 0
+ORDER BY 
+posts.created_at DESC
+LIMIT 
+20`
+
+	results2 := []Post{}
+	err2 := db.Select(&results2, query)
+	if err2 != nil {
+		log.Print(err2)
+		return
+	}
+
+	// ポストIDを取得して一括でコメントを取得
+	postIDs := []int{}
+	for _, post := range results2 {
+		postIDs = append(postIDs, post.ID)
+	}
+
+	queryComments := `
+    SELECT 
+        sub.id, 
+        sub.post_id, 
+        sub.user_id, 
+        sub.comment, 
+        sub.created_at, 
+        users.id AS "user.id", 
+        users.account_name AS "user.account_name"
+    FROM 
+        (SELECT 
+            comments.id, 
+            comments.post_id, 
+            comments.user_id, 
+            comments.comment, 
+            comments.created_at,
+            ROW_NUMBER() OVER (PARTITION BY comments.post_id ORDER BY comments.created_at DESC) AS rn
+        FROM 
+            comments 
+        WHERE 
+            comments.post_id IN (?)
+        ) AS sub
+    JOIN 
+        users ON users.id = sub.user_id 
+    WHERE 
+        sub.rn <= 3
+`
+	queryComments, args, err := sqlx.In(queryComments, postIDs)
 	if err != nil {
 		log.Print(err)
 		return
 	}
 
-	posts, err := makePosts2(results, getCSRFToken(r), false)
+	comments := []Comment{}
+	err = db.Select(&comments, db.Rebind(queryComments), args...)
 	if err != nil {
 		log.Print(err)
 		return
 	}
+
+	// コメントをポストにマッピング
+	commentMap := make(map[int][]Comment)
+	for _, comment := range comments {
+		commentMap[comment.PostID] = append(commentMap[comment.PostID], comment)
+	}
+
+	// ポストにコメントを関連付け
+	for i := range results2 {
+		results2[i].Comments = commentMap[results2[i].ID]
+	}
+
+	// posts, err := makePosts2(results, getCSRFToken(r), false)
+	// if err != nil {
+	// 	log.Print(err)
+	// 	return
+	// }
 
 	fmap := template.FuncMap{
 		"imageURL": imageURL,
@@ -467,7 +551,7 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 		Me        User
 		CSRFToken string
 		Flash     string
-	}{posts, me, getCSRFToken(r), getFlash(w, r, "notice")})
+	}{results2, me, getCSRFToken(r), getFlash(w, r, "notice")})
 }
 
 func getAccountName(w http.ResponseWriter, r *http.Request) {
