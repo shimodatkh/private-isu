@@ -569,18 +569,107 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results := []Post{}
+	// results := []Post{}
 
-	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
+	// err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
+	// if err != nil {
+	// 	log.Print(err)
+	// 	return
+	// }
+
+	// posts, err := makePosts(results, getCSRFToken(r), false)
+	// if err != nil {
+	// 	log.Print(err)
+	// 	return
+	// }
+
+	query := `    
+	SELECT 
+		posts.id AS "id",
+		posts.user_id AS "user_id",
+		posts.body AS "body",
+		posts.mime AS "mime",
+		posts.created_at AS "created_at",
+		users.id AS "user.id",
+		users.account_name AS "user.account_name",
+		(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id) AS "comment_count"
+	FROM
+		posts
+	JOIN 
+		users ON users.id = posts.user_id AND users.del_flg = 0
+	WHERE
+		users.id = ?
+	ORDER BY 
+		posts.created_at DESC
+	LIMIT 
+		20`
+
+	results2 := []Post{}
+	err2 := db.Select(&results2, query, user.ID)
+	if err2 != nil {
+		log.Print(err2)
+		return
+	}
+
+	// ポストIDを取得して一括でコメントを取得
+	postIDs3 := []int{}
+	for _, post := range results2 {
+		postIDs3 = append(postIDs3, post.ID)
+	}
+
+	queryComments := `
+		SELECT 
+			sub.id, 
+			sub.post_id, 
+			sub.user_id, 
+			sub.comment, 
+			sub.created_at, 
+			users.id AS "user.id", 
+			users.account_name AS "user.account_name"
+		FROM 
+			(SELECT 
+				comments.id, 
+				comments.post_id, 
+				comments.user_id, 
+				comments.comment, 
+				comments.created_at,
+				ROW_NUMBER() OVER (PARTITION BY comments.post_id ORDER BY comments.created_at DESC) AS rn
+			FROM 
+				comments 
+			WHERE 
+				comments.post_id IN (?)
+			) AS sub
+		JOIN 
+			users ON users.id = sub.user_id 
+		WHERE 
+			sub.rn <= 3
+	`
+	queryComments, args, err := sqlx.In(queryComments, postIDs3)
 	if err != nil {
 		log.Print(err)
 		return
 	}
 
-	posts, err := makePosts(results, getCSRFToken(r), false)
+	comments := []Comment{}
+	err = db.Select(&comments, db.Rebind(queryComments), args...)
 	if err != nil {
 		log.Print(err)
 		return
+	}
+
+	// コメントをポストにマッピング
+	commentMap := make(map[int][]Comment)
+	for _, comment := range comments {
+		commentMap[comment.PostID] = append(commentMap[comment.PostID], comment)
+	}
+
+	csrf := getCSRFToken(r)
+
+	// ポストにコメントを関連付け
+	for i := range results2 {
+		results2[i].Comments = commentMap[results2[i].ID]
+		// CSRFトークンを設定
+		results2[i].CSRFToken = csrf
 	}
 
 	commentCount := 0
@@ -637,7 +726,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 		CommentCount   int
 		CommentedCount int
 		Me             User
-	}{posts, user, postCount, commentCount, commentedCount, me})
+	}{results2, user, postCount, commentCount, commentedCount, me})
 }
 
 func getPosts(w http.ResponseWriter, r *http.Request) {
